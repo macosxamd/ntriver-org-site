@@ -43,7 +43,7 @@ The DigitalProductId comes in three different versions.
 | `ProductId`                | 8      | 24 bytes | `String (ASCII)` | Null-terminated Product ID string.                                                                                                                                           |
 | `KeyIndex`                 | 32     | 4 bytes  | `UInt32`         | Key index value.                                                                                                                                                             |
 | `EditionId`                | 36     | 16 bytes | `String (ASCII)` | Null-terminated edition string (e.g. `Professional`).                                                                                                                        |
-| `CDKeyBytes`               | 52     | 16 bytes | `Byte[]`         | 15 bytes of encoded key data (byte 15 is always zero).                                                                                                                       |
+| `CDKeyBytes`               | 52     | 16 bytes | `Byte[]`         | 15 bytes of encoded key data. The 16th byte is padding and always zero.                                                                                      |
 | `CloneStatus`              | 68     | 4 bytes  | `UInt32`         | Clone status flag.                                                                                                                                                           |
 | `Time`                     | 72     | 4 bytes  | `UInt32`         | Timestamp of key installation.                                                                                                                                               |
 | `Random`                   | 76     | 4 bytes  | `UInt32`         | Random value.                                                                                                                                                                |
@@ -79,7 +79,7 @@ The DigitalProductId comes in three different versions.
 | `EditionType`   | 280    | 520 bytes | `String (Unicode)` | Edition type string.                                                          |
 | `IsUpgrade`     | 800    | 1 byte    | `Byte`             | `1` if this is an upgrade key, `0` otherwise.                                 |
 | `ReservedBytes` | 801    | 7 bytes   | `Byte[]`           | Reserved, always zero.                                                        |
-| `CDKeyBytes`    | 808    | 16 bytes  | `Byte[]`           | 15 bytes of encoded key data (byte 15 is always zero).                        |
+| `CDKeyBytes`    | 808    | 16 bytes  | `Byte[]`           | 15 bytes of encoded key data. The 16th byte is padding and always zero.                       |
 | `CDKey256Hash`  | 824    | 32 bytes  | `Byte[]`           | SHA256 hash of the 16 `CDKeyBytes`.                                           |
 | `Hash256`       | 856    | 32 bytes  | `Byte[]`           | SHA256 hash of the entire blob (with this field zeroed out).                  |
 | `EditionId`     | 888    | 128 bytes | `String (Unicode)` | Edition ID string.                                                            |
@@ -187,7 +187,7 @@ The 15 key bytes live at a different offset depending on the DPID version:
 - **v3 blob:** offset `52`, length `16`
 - **v4 blob:** offset `808`, length `16`
 
-Only the first 15 bytes (index 0-14) carry key data. The 16th byte is always zero. We extract all 16 bytes because later we will convert this array into a large positive integer, and `.NET` requires a trailing zero byte to ensure the number isn't treated as negative.
+Only the first 15 bytes carry key data. The 16th byte is always zero. We extract all 16 bytes because later we will convert this array into a large positive integer, and `.NET` requires a trailing zero byte to ensure the number isn't treated as negative.
 
 ```powershell
 $bytes = New-Object byte[] 16
@@ -198,7 +198,7 @@ $bytes = New-Object byte[] 16
 
 Some product keys contain the letter `N` (e.g. `98NKM-KC6J9-2QGVJ-GMQJT-MPV6T`). These are called **PKey2009** keys and were introduced in Windows 8. The `N` is not part of the Base24 alphabet. It is a special marker injected during decoding. For a deeper look at how PKey2009 keys work, see the [Decode PKey2009 Keys](/pkeymaster/decode-pkey2009-keys) guide.
 
-To indicate that an `N` must be injected, Microsoft sets a single bit inside the raw `CDKeyBytes` data: **bit 3 of byte 14** (the last usable byte). Think of it as a tiny on/off switch hidden inside the key bytes:
+To indicate that an `N` must be injected, Microsoft sets a single bit inside the raw `CDKeyBytes` data: **bit 3 of the 15th byte** (the last usable byte). Think of it as a tiny on/off switch hidden inside the key bytes:
 
 - Switch **ON** (`1`): inject an `N` into the decoded key.
 - Switch **OFF** (`0`): no `N`, decode normally.
@@ -206,12 +206,12 @@ To indicate that an `N` must be injected, Microsoft sets a single bit inside the
 You read the switch, then turn it off (clear the bit) before decoding, so it doesn't interfere with the Base24 math:
 
 ```powershell
-$byte14     = $bytes[14]
-$injectN    = ($byte14 -shr 3) -band 1   # shift right 3 bits, then check lowest bit
-$bytes[14]  = $byte14 -band 0xF7         # turn off bit 3
+$lastByte   = $bytes[14]                 # The 15th byte (array index 14)
+$injectN    = ($lastByte -shr 3) -band 1 # shift right 3 bits, then check lowest bit
+$bytes[14]  = $lastByte -band 0xF7       # turn off bit 3
 ```
 
-**Example from live registry:** Byte 14 = `0x09` which is binary `0000 1001`. Bit 3 is ON, so `$injectN = 1`. After clearing, `0x09 AND 0xF7 = 0x01` and byte 14 is now clean for decoding.
+**Example from live registry:** Let's say the 15th byte is `0x09` (binary `0000 1001`). Because bit 3 is a `1`, the switch is ON (`$injectN = 1`). Before decoding, this switch must be turned OFF so it doesn't corrupt the actual key data. By applying a bitwise AND (`-band 0xF7`), we can safely force bit 3 to zero while keeping all other bits exactly as they were. This turns `0000 1001` into `0000 0001` (`0x01`), making the byte clean and ready for the math ahead.
 
 ### Step 3: Base24 decode
 
@@ -281,7 +281,7 @@ if ($injectN -eq 1) {
 }
 ```
 
-**Why drop the first character?** The N-injection flag was hidden inside byte 14, which skewed the Base24 result. Removing the leading character corrects for that, and the `N` takes the slot that was freed. The position encoded in `$lastRemainder` ensures the `N` lands in the right spot when the key is read back.
+**Why drop the first character?** The N-injection flag was hidden inside the 15th byte, which skewed the Base24 result. Removing the leading character corrects for that, and the `N` takes the slot that was freed. The position encoded in `$lastRemainder` ensures the `N` lands in the right spot when the key is read back.
 
 **Example from live registry:** `$injectN = 1` and `$lastRemainder = 5`, so `N` is inserted at position 5:
 
